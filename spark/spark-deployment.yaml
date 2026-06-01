@@ -1,0 +1,232 @@
+---
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 3 – Déploiement de Spark en mode cluster sur Kubernetes
+# Architecture : 1 Spark Master + 2 Spark Workers
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Namespace Spark ───────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spark
+  labels:
+    app: spark
+
+---
+# ── ServiceAccount pour Spark (nécessaire pour spark-submit sur K8s) ─────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark
+  namespace: spark
+
+---
+# ── ClusterRoleBinding pour le ServiceAccount Spark ──────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spark-role
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+subjects:
+  - kind: ServiceAccount
+    name: spark
+    namespace: spark
+
+---
+# ══════════════════════════════════════════════════════════════════════════════
+# SPARK MASTER
+# ══════════════════════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+  namespace: spark
+  labels:
+    app: spark
+    role: master
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark
+      role: master
+  template:
+    metadata:
+      labels:
+        app: spark
+        role: master
+      annotations:
+        # Activer le scraping Prometheus
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      serviceAccountName: spark
+      containers:
+        - name: spark-master
+          image: bitnami/spark:3.5.0
+          env:
+            - name: SPARK_MODE
+              value: master
+            - name: SPARK_RPC_AUTHENTICATION_ENABLED
+              value: "no"
+            - name: SPARK_RPC_ENCRYPTION_ENABLED
+              value: "no"
+            - name: SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED
+              value: "no"
+            - name: SPARK_SSL_ENABLED
+              value: "no"
+            # Activer les métriques Prometheus
+            - name: SPARK_METRICS_ENABLED
+              value: "true"
+          ports:
+            - name: web-ui
+              containerPort: 8080    # Interface web Spark Master
+            - name: spark
+              containerPort: 7077    # Port de communication Spark
+            - name: rest
+              containerPort: 6066    # API REST spark-submit
+            - name: metrics
+              containerPort: 4040    # Spark UI (applications en cours)
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 15
+            timeoutSeconds: 5
+
+---
+# ── Service Spark Master ──────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-master-service
+  namespace: spark
+  labels:
+    app: spark
+    role: master
+spec:
+  type: NodePort
+  ports:
+    - name: web-ui
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080   # Accessible : http://<master-IP>:30080
+    - name: spark
+      port: 7077
+      targetPort: 7077
+    - name: rest
+      port: 6066
+      targetPort: 6066
+  selector:
+    app: spark
+    role: master
+
+---
+# ══════════════════════════════════════════════════════════════════════════════
+# SPARK WORKERS (2 répliques)
+# ══════════════════════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker
+  namespace: spark
+  labels:
+    app: spark
+    role: worker
+spec:
+  replicas: 2    # 2 workers = déploiement en mode cluster
+  selector:
+    matchLabels:
+      app: spark
+      role: worker
+  template:
+    metadata:
+      labels:
+        app: spark
+        role: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+    spec:
+      serviceAccountName: spark
+      containers:
+        - name: spark-worker
+          image: bitnami/spark:3.5.0
+          env:
+            - name: SPARK_MODE
+              value: worker
+            - name: SPARK_MASTER_URL
+              value: spark://spark-master-service:7077
+            - name: SPARK_WORKER_MEMORY
+              value: "1G"
+            - name: SPARK_WORKER_CORES
+              value: "1"
+            - name: SPARK_RPC_AUTHENTICATION_ENABLED
+              value: "no"
+            - name: SPARK_RPC_ENCRYPTION_ENABLED
+              value: "no"
+            - name: SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED
+              value: "no"
+            - name: SPARK_SSL_ENABLED
+              value: "no"
+            - name: SPARK_METRICS_ENABLED
+              value: "true"
+          ports:
+            - name: worker-ui
+              containerPort: 8081   # Interface web du worker
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8081
+            initialDelaySeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8081
+            initialDelaySeconds: 15
+            timeoutSeconds: 5
+
+---
+# ── Service Spark Worker (pour l'UI) ─────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-worker-service
+  namespace: spark
+  labels:
+    app: spark
+    role: worker
+spec:
+  type: NodePort
+  ports:
+    - name: worker-ui
+      port: 8081
+      targetPort: 8081
+      nodePort: 30081
+  selector:
+    app: spark
+    role: worker
